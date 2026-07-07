@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: Arial, sans-serif; margin: 0; padding: 12px; background: #f5f5f5; }
+    h2 { margin: 0 0 10px; font-size: 18px; }
+    #status { font-size: 13px; padding: 6px 10px; border-radius: 6px; margin-bottom: 10px; }
+    .online { background: #d4f8d4; color: #1a6b1a; }
+    .offline { background: #ffdcdc; color: #a30000; }
+    label { font-size: 13px; font-weight: bold; display: block; margin: 8px 0 4px; }
+    input, textarea { width: 100%; padding: 10px; font-size: 15px; border: 1px solid #ccc; border-radius: 6px; }
+    textarea { resize: vertical; min-height: 50px; }
+    button { width: 100%; padding: 12px; font-size: 15px; border: none; border-radius: 6px; margin-top: 10px; cursor: pointer; }
+    #scanBtn { background: #2563eb; color: #fff; }
+    #addBtn { background: #16a34a; color: #fff; }
+    #closeScanBtn { background: #6b7280; color: #fff; display: none; }
+    #videoWrap { position: relative; width: 100%; margin-top: 10px; display: none; border-radius: 6px; overflow: hidden; background: #000; }
+    #video { width: 100%; display: block; }
+    #scanFrame {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      width: 75%; height: 35%;
+      border: 3px solid #22c55e;
+      border-radius: 10px;
+      box-shadow: 0 0 0 2000px rgba(0,0,0,0.35);
+      pointer-events: none;
+    }
+    #scanFrame::before, #scanFrame::after {
+      content: '';
+      position: absolute;
+      width: 24px; height: 24px;
+      border-color: #fff;
+      border-style: solid;
+    }
+    #scanFrame::before { top: -3px; left: -3px; border-width: 4px 0 0 4px; }
+    #scanFrame::after { bottom: -3px; right: -3px; border-width: 0 4px 4px 0; }
+    table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 12px; background: #fff; }
+    thead tr { background: #e5e7eb; text-align: left; }
+    th, td { padding: 6px; word-break: break-word; }
+    tbody tr { border-bottom: 1px solid #eee; }
+    .status-pending { color: #b45309; font-weight: bold; }
+    .status-saving { color: #2563eb; font-weight: bold; }
+    .status-synced { color: #15803d; font-weight: bold; }
+    #modalOverlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); align-items: center; justify-content: center; }
+    #modalBox { background: #fff; padding: 18px; border-radius: 8px; width: 85%; max-width: 320px; }
+    #modalBox h3 { margin-top: 0; font-size: 16px; color: #b91c1c; }
+    #forceBtn { background: #dc2626; color: #fff; }
+    #cancelBtn { background: #e5e7eb; color: #111; }
+  </style>
+</head>
+<body>
+  <h2>Vartan Store - Add Product</h2>
+  <div id="status" class="online">Online</div>
+
+  <button id="scanBtn">📷 Scan Barcode/QR</button>
+  <div id="videoWrap">
+    <video id="video" autoplay muted playsinline></video>
+    <div id="scanFrame"></div>
+  </div>
+  <button id="closeScanBtn">✖ Close Scanner</button>
+  <button id="torchBtn" style="display:none; background:#eab308; color:#111;">🔦 Torch ON/OFF</button>
+
+  <label>Barcode/QR No</label>
+  <input id="barcodeInput" type="text" placeholder="Scan ya type karein">
+
+  <label>Product Description</label>
+  <textarea id="descInput" placeholder="Product ka naam/description"></textarea>
+
+  <label>Quantity</label>
+  <input id="qtyInput" type="number" min="1" value="1" placeholder="Quantity">
+
+  <button id="addBtn">➕ Add</button>
+
+  <table>
+    <thead>
+      <tr><th>Barcode</th><th>Description</th><th>Qty</th><th>Status</th></tr>
+    </thead>
+    <tbody id="queueBody"></tbody>
+  </table>
+
+  <div id="modalOverlay">
+    <div id="modalBox">
+      <h3>⚠️ Duplicate Barcode!</h3>
+      <p id="modalText"></p>
+      <button id="forceBtn">Force Save Anyway</button>
+      <button id="cancelBtn">Cancel</button>
+    </div>
+  </div>
+
+  <script>
+    // ✅ Aapka deployed Apps Script URL (already filled in)
+    const EXEC_URL = 'https://script.google.com/macros/s/AKfycbzZ-0dbyM5-5xmzD84UA9VCpw3Wg2NUErvf5IKvYtVmupT5hwkqP0AOdyWLlJqtiJz-/exec';
+    // ⚠️ YE Code.gs WALI API_KEY SE MATCH HONI CHAHIYE
+    const API_KEY = 'VARTAN2026-secret-XJ92kd';
+
+    let queue = [];
+    let existingBarcodes = new Set();
+    let syncing = false;
+    let pendingForce = null;
+
+    try {
+      queue = JSON.parse(localStorage.getItem('vartanQueue') || '[]');
+      existingBarcodes = new Set(JSON.parse(localStorage.getItem('vartanExisting') || '[]'));
+    } catch (e) { console.error(e); }
+
+    const statusEl = document.getElementById('status');
+    const barcodeInput = document.getElementById('barcodeInput');
+    const descInput = document.getElementById('descInput');
+    const qtyInput = document.getElementById('qtyInput');
+    const queueBody = document.getElementById('queueBody');
+    const modalOverlay = document.getElementById('modalOverlay');
+    const modalText = document.getElementById('modalText');
+    const video = document.getElementById('video');
+    const scanBtn = document.getElementById('scanBtn');
+    const closeScanBtn = document.getElementById('closeScanBtn');
+
+    function saveQueue() { localStorage.setItem('vartanQueue', JSON.stringify(queue)); }
+    function saveExisting() { localStorage.setItem('vartanExisting', JSON.stringify(Array.from(existingBarcodes))); }
+
+    function renderQueue() {
+      queueBody.innerHTML = '';
+      queue.slice().reverse().forEach(item => {
+        const tr = document.createElement('tr');
+        const label = item.status === 'synced' ? 'Saved ✔' : item.status === 'saving' ? 'Saving...' : 'Pending';
+        const cls = item.status === 'synced' ? 'status-synced' : item.status === 'saving' ? 'status-saving' : 'status-pending';
+        tr.innerHTML = `<td>${item.barcode}</td><td>${item.description || ''}</td><td>${item.quantity || 1}</td><td class="${cls}">${label}</td>`;
+        queueBody.appendChild(tr);
+      });
+    }
+
+    function updateOnlineStatus() {
+      if (navigator.onLine) { statusEl.textContent = 'Online'; statusEl.className = 'online'; }
+      else { statusEl.textContent = 'Offline - saving locally'; statusEl.className = 'offline'; }
+    }
+    window.addEventListener('online', updateOnlineStatus);
+    window.addEventListener('offline', updateOnlineStatus);
+    updateOnlineStatus();
+
+    // Backend call helper (POST, text/plain trick — GAS CORS ke liye zaroori)
+    function callBackend(payload) {
+      return fetch(EXEC_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(Object.assign({ key: API_KEY }, payload))
+      }).then(r => r.json());
+    }
+
+    callBackend({ action: 'getExisting' }).then(res => {
+      if (res.status === 'success') {
+        res.data.forEach(b => existingBarcodes.add(b));
+        saveExisting();
+      }
+    }).catch(err => console.error('Load existing failed:', err));
+
+    function addToQueue(barcode, description, force, quantity) {
+      const item = { id: Date.now() + Math.random(), barcode, description, quantity: quantity || 1, force: !!force, status: 'pending' };
+      queue.push(item);
+      existingBarcodes.add(barcode);
+      saveQueue();
+      saveExisting();
+      renderQueue();
+      trySync();
+    }
+
+    document.getElementById('addBtn').addEventListener('click', () => {
+      const barcode = barcodeInput.value.trim();
+      const description = descInput.value.trim();
+      const quantity = parseInt(qtyInput.value, 10) || 1;
+      if (!barcode) { alert('Barcode/QR number daalein'); return; }
+
+      if (existingBarcodes.has(barcode)) {
+        pendingForce = { barcode, description, quantity };
+        modalText.textContent = `Barcode "${barcode}" pehle se maujood hai. Kya aap phir bhi save karna chahte hain?`;
+        modalOverlay.style.display = 'flex';
+        return;
+      }
+      addToQueue(barcode, description, false, quantity);
+      barcodeInput.value = '';
+      descInput.value = '';
+      qtyInput.value = '1';
+    });
+
+    document.getElementById('forceBtn').addEventListener('click', () => {
+      if (pendingForce) {
+        addToQueue(pendingForce.barcode, pendingForce.description, true, pendingForce.quantity);
+        barcodeInput.value = '';
+        descInput.value = '';
+        qtyInput.value = '1';
+        pendingForce = null;
+      }
+      modalOverlay.style.display = 'none';
+    });
+    document.getElementById('cancelBtn').addEventListener('click', () => {
+      pendingForce = null;
+      modalOverlay.style.display = 'none';
+    });
+
+    function trySync() {
+      if (syncing) return;
+      const item = queue.find(q => q.status === 'pending');
+      if (!item) return;
+      if (!navigator.onLine) return;
+      syncing = true;
+      item.status = 'saving';
+      saveQueue();
+      renderQueue();
+
+      callBackend({ action: 'addProduct', barcode: item.barcode, description: item.description, force: item.force, quantity: item.quantity })
+        .then(res => {
+          syncing = false;
+          if (res.status === 'success') {
+            item.status = 'synced';
+            saveQueue();
+            renderQueue();
+            setTimeout(() => {
+              queue = queue.filter(q => q.id !== item.id || q.status !== 'synced');
+              saveQueue();
+              renderQueue();
+            }, 1500);
+          } else if (res.status === 'duplicate') {
+            item.force = true;
+            item.status = 'pending';
+            saveQueue();
+          } else {
+            item.status = 'pending';
+            saveQueue();
+            console.error('Save error:', res.message);
+          }
+          trySync();
+        })
+        .catch(err => {
+          syncing = false;
+          item.status = 'pending';
+          saveQueue();
+          renderQueue();
+          console.error(err);
+        });
+    }
+
+    setInterval(trySync, 4000);
+    renderQueue();
+
+    // ---- ZXing Scanner ----
+    let codeReader;
+    let scanning = false;
+
+    scanBtn.addEventListener('click', async () => {
+      if (typeof ZXing === 'undefined') {
+        alert('⚠️ Scanner library load nahi hui. Page reload karein.');
+        return;
+      }
+      document.getElementById('videoWrap').style.display = 'block';
+      closeScanBtn.style.display = 'block';
+      scanBtn.style.display = 'none';
+      scanning = true;
+
+      try {
+        codeReader = new ZXing.BrowserMultiFormatReader();
+        const constraints = {
+          video: { facingMode: { ideal: 'environment' } },
+          audio: false
+        };
+        codeReader.decodeFromConstraints(constraints, video, (result, err) => {
+          if (result && scanning) {
+            barcodeInput.value = result.getText().trim();
+            stopScanner();
+          }
+        });
+
+        // Auto torch ON (jahan device/browser support kare)
+        setTimeout(() => setTorch(true), 700);
+      } catch (e) {
+        let msg = e.name === 'NotAllowedError'
+          ? 'Camera permission block hai. Browser ke lock icon (address bar) se Camera "Allow" karein, phir dobara try karein.'
+          : e.name === 'NotFoundError'
+          ? 'Koi camera nahi mila is device mein.'
+          : 'Camera error: ' + e.message;
+        alert('⚠️ ' + msg);
+        stopScanner();
+      }
+    });
+
+    let torchOn = false;
+    let torchSupported = false;
+
+    function getTrack() {
+      const stream = video.srcObject;
+      if (!stream) return null;
+      return stream.getVideoTracks()[0] || null;
+    }
+
+    async function setTorch(state) {
+      const track = getTrack();
+      if (!track) return;
+
+      // Method 1: standard applyConstraints
+      try {
+        const caps = track.getCapabilities ? track.getCapabilities() : {};
+        if (caps.torch) {
+          await track.applyConstraints({ advanced: [{ torch: state }] });
+          torchOn = state;
+          torchSupported = true;
+          document.getElementById('torchBtn').style.display = 'block';
+          return;
+        }
+      } catch (e) {}
+
+      // Method 2: ImageCapture fallback (some Android browsers)
+      try {
+        if (window.ImageCapture) {
+          const imageCapture = new ImageCapture(track);
+          const caps = await imageCapture.getPhotoCapabilities();
+          if (caps.torch || (caps.fillLightMode && caps.fillLightMode.includes('flash'))) {
+            await track.applyConstraints({ advanced: [{ torch: state }] });
+            torchOn = state;
+            torchSupported = true;
+            document.getElementById('torchBtn').style.display = 'block';
+            return;
+          }
+        }
+      } catch (e) {}
+
+      torchSupported = false;
+      document.getElementById('torchBtn').style.display = 'none';
+    }
+
+    document.getElementById('torchBtn').addEventListener('click', () => {
+      setTorch(!torchOn);
+    });
+
+    closeScanBtn.addEventListener('click', stopScanner);
+
+    function stopScanner() {
+      scanning = false;
+      try {
+        if (codeReader) codeReader.reset();
+      } catch (e) {}
+      if (video.srcObject) {
+        video.srcObject.getTracks().forEach(t => t.stop());
+        video.srcObject = null;
+      }
+      torchOn = false;
+      document.getElementById('torchBtn').style.display = 'none';
+      document.getElementById('videoWrap').style.display = 'none';
+      closeScanBtn.style.display = 'none';
+      scanBtn.style.display = 'block';
+    }
+  </script>
+</body>
+</html>
